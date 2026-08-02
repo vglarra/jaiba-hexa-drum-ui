@@ -2,14 +2,15 @@
 #include <TFT_eSPI.h>
 
 #include "drum_state.h"
+#include "screens.h"
 #include "uart_protocol.h"
 
 // ============================================================
-// UART protocol bring-up — real message parsing (drum_state.h,
-// uart_protocol.h/.cpp) now replaces the old throwaway PAD,<label>
-// test protocol. No real UI screens yet (see UI_PLAN.md); the protocol
-// layer is being built and verified first, ahead of the original build
-// order, since the drum side is now fully implemented and stable.
+// Real UART message parsing (drum_state.h, uart_protocol.h/.cpp) and the
+// first real UI screen (screens.h/.cpp, starting with the splash screen
+// per UI_PLAN.md) now replace the old throwaway PAD,<label> test protocol
+// and its static status text. The Serial passthrough debug tooling below
+// stays in place for manual protocol testing while more screens get built.
 // ============================================================
 
 TFT_eSPI tft = TFT_eSPI();
@@ -97,16 +98,12 @@ void setup() {
 
     tft.init();
     tft.setRotation(0);
-    tft.fillScreen(TFT_BLACK);
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(2);
-    tft.setCursor(10, 10);
-    tft.println("UART protocol active");
-    tft.println("Watch Serial Monitor");
+    screensInit(tft);
 }
 
 void loop() {
     uartProtocolUpdate();
+    updateScreen();
 
     // Test-command passthrough: forward lines typed into the USB Serial
     // Monitor to the drum Teensy over Serial1, for manual protocol testing
