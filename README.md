@@ -1,7 +1,7 @@
 # Jaiba Hexa Drum UI
 
 Touchscreen UI firmware for a Teensy 4.1, built with PlatformIO. This is a
-separate project from the DIVA drum MIDI controller — it will eventually
+separate project from the Jaiba drum MIDI controller — it will eventually
 become a touchscreen UI (likely for controlling/monitoring the drum
 project, or another purpose TBD), but **phase 1 is hardware bring-up
 only**: confirming the display and touch controller both work correctly
