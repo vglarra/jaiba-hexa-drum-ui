@@ -2,112 +2,98 @@
 #include <TFT_eSPI.h>
 
 // ============================================================
-// TFT + TOUCH TEST — Teensy 4.1, ST7796 display, XPT2046 touch
+// UART LINK TEST — Teensy 4.1, ST7796 display
 //
-// Display and touch pin config lives in platformio.ini (build_flags),
-// not here — TFT_eSPI reads its setup at compile time via those defines.
+// Temporary test screen: receives pad-hit messages from the drum Teensy
+// over Serial1 (RX1=pin 0, TX1=pin 1) and displays the pad label large
+// and centered the moment a "PAD,<label>" line arrives.
 //
-// Wiring reference (from hardware research):
-//   TFT (ST7796):   MISO=12  MOSI=11  SCLK=13  CS=10  DC=8  RST=9  LED=3.3V
-//   Touch (XPT2046): shares TFT's SPI bus, CS=6, IRQ=7 (unused, polling only)
-//
-// Calibration values below were found by touching the four corners of the
-// physical screen and reading the raw X/Y from Serial Monitor. Re-run that
-// process if you ever swap displays or the readings drift.
+// Touch-test behavior (previous main.cpp) is not running while this test
+// is active — see git history to restore it once the UART link is verified.
 // ============================================================
 
 TFT_eSPI tft = TFT_eSPI();
 
-#define CALIBRATION_X_MIN 1840
-#define CALIBRATION_X_MAX 31480
-#define CALIBRATION_Y_MIN 31104
-#define CALIBRATION_Y_MAX 1824
+#define UART_LINE_MAX 63
 
-bool readTouchData(uint16_t &x, uint16_t &y);
-uint16_t medianOfSamples(uint16_t *samples, uint8_t count);
-
-// Oversampling settings for readTouchData(): resistive touch ADC reads are
-// noisy on a single sample, so we take a small burst per touch and use the
-// median (robust to a single spurious glitch) instead of the raw value.
-// 7 samples * ~500us settling between them adds ~3ms of latency total —
-// well under perceptible touch lag, unlike the longer settling times we
-// had to back off from on the piezo/drum project.
-#define TOUCH_SAMPLES 7
-#define TOUCH_SETTLE_US 500
+void showPadLabel(const String &label);
 
 void setup() {
     Serial.begin(9600);
     while (!Serial && millis() < 2000); // don't hang forever if no monitor is attached
 
+    Serial1.begin(115200); // UART link from drum Teensy
+
     tft.init();
     tft.setRotation(0);
     tft.fillScreen(TFT_BLACK);
-
-    tft.setCursor(10, 10);
     tft.setTextColor(TFT_WHITE);
     tft.setTextSize(2);
-    tft.println("Touch Screen Test");
-    tft.println("Check Serial Monitor");
-
-    pinMode(TOUCH_CS, OUTPUT);
-    digitalWrite(TOUCH_CS, HIGH); // deselected by default
+    tft.setCursor(10, 10);
+    tft.println("Waiting for pad hit...");
 }
 
 void loop() {
-    uint16_t x_raw, y_raw;
-    if (readTouchData(x_raw, y_raw)) {
-        Serial.print("Raw X: "); Serial.print(x_raw);
-        Serial.print(", Raw Y: "); Serial.println(y_raw);
+    static String line;
 
-        uint16_t mapped_x = map(x_raw, CALIBRATION_X_MIN, CALIBRATION_X_MAX, 0, tft.width());
-        uint16_t mapped_y = map(y_raw, CALIBRATION_Y_MIN, CALIBRATION_Y_MAX, 0, tft.height());
+    while (Serial1.available()) {
+        char c = Serial1.read();
 
-        Serial.print("Mapped X: "); Serial.print(mapped_x);
-        Serial.print(", Mapped Y: "); Serial.println(mapped_y);
+        if (c == '\n') {
+            line.trim(); // drop trailing \r and stray whitespace
 
-        tft.fillCircle(mapped_x, mapped_y, 5, TFT_RED);
-    }
+            Serial.print("Serial1 << ");
+            Serial.println(line);
 
-    delay(100);
-}
+            if (line.startsWith("PAD,")) {
+                String label = line.substring(4);
+                label.trim();
 
-bool readTouchData(uint16_t &x, uint16_t &y) {
-    uint16_t xSamples[TOUCH_SAMPLES];
-    uint16_t ySamples[TOUCH_SAMPLES];
+                Serial.print("Pad hit: ");
+                Serial.println(label);
 
-    digitalWrite(TOUCH_CS, LOW);
-    SPI.beginTransaction(SPISettings(2500000, MSBFIRST, SPI_MODE0));
+                showPadLabel(label);
+            }
 
-    for (uint8_t i = 0; i < TOUCH_SAMPLES; i++) {
-        SPI.transfer(0x90);              // command: read Y
-        ySamples[i] = SPI.transfer16(0x0000);
-        SPI.transfer(0xD0);              // command: read X
-        xSamples[i] = SPI.transfer16(0x0000);
-        if (i < TOUCH_SAMPLES - 1) delayMicroseconds(TOUCH_SETTLE_US);
-    }
-
-    SPI.endTransaction();
-    digitalWrite(TOUCH_CS, HIGH);
-
-    x = medianOfSamples(xSamples, TOUCH_SAMPLES);
-    y = medianOfSamples(ySamples, TOUCH_SAMPLES);
-
-    if (x > 100 && y > 100) {
-        return true;
-    }
-    return false;
-}
-
-uint16_t medianOfSamples(uint16_t *samples, uint8_t count) {
-    // Insertion sort — count is small (single-digit), so this is cheap.
-    for (uint8_t i = 1; i < count; i++) {
-        uint16_t key = samples[i];
-        int8_t j = i - 1;
-        while (j >= 0 && samples[j] > key) {
-            samples[j + 1] = samples[j];
-            j--;
+            line = "";
+        } else {
+            line += c;
+            if (line.length() > UART_LINE_MAX) line = ""; // discard garbage/noise line
         }
-        samples[j + 1] = key;
     }
-    return samples[count / 2];
+
+    // Test-command passthrough: forward lines typed into the USB Serial
+    // Monitor to the drum Teensy over Serial1, for protocol testing.
+    static String cmdLine;
+
+    while (Serial.available()) {
+        char c = Serial.read();
+
+        if (c == '\n') {
+            cmdLine.trim(); // drop trailing \r and stray whitespace
+
+            if (cmdLine.length() > 0) {
+                Serial1.print(cmdLine);
+                Serial1.print('\n');
+
+                Serial.print("Serial1 >> ");
+                Serial.println(cmdLine);
+            }
+
+            cmdLine = "";
+        } else {
+            cmdLine += c;
+            if (cmdLine.length() > UART_LINE_MAX) cmdLine = ""; // discard garbage/noise line
+        }
+    }
+}
+
+void showPadLabel(const String &label) {
+    tft.fillScreen(TFT_BLACK);
+
+    tft.setTextSize(4);
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextDatum(MC_DATUM); // middle-center anchor
+    tft.drawString(label, tft.width() / 2, tft.height() / 2);
+    tft.setTextDatum(TL_DATUM); // restore default anchor
 }
