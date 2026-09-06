@@ -1,5 +1,7 @@
 #include "screens.h"
 
+#include "hex_grid.h"
+
 namespace {
 
 // Splash has nothing real to wait on yet (no boot/init work gates it) --
@@ -36,7 +38,11 @@ void drawSplash() {
 }
 
 void drawLandingPlaceholder() {
-    drawCenteredLines("Landing page", "coming soon", 2);
+    // TEMPORARY: previewing hex_grid on real hardware ahead of building the
+    // actual landing page (no footer, no tap handling yet). Replace this
+    // whole function once the real landing page screen is built.
+    tft->fillScreen(TFT_BLACK);
+    drawHexGrid(*tft, 0, 0, tft->width(), tft->height());
 }
 
 void updateSplash() {

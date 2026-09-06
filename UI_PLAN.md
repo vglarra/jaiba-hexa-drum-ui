@@ -44,15 +44,19 @@ design block screen/layout work.
 Splash screen
    |
    v
-Landing page (4x4 pad matrix + footer)
+Landing page (9-tile hex layout, matching physical shell + footer)
    |
-   +--> Pad Assignment
+   +--> Tap a populated tile --> per-pad action menu
+   |       +--> Assign note
+   |       +--> Calibrate this pad (single-pad CAL_START)
+   |       +--> View info
+   |       +--> Adjust threshold/ceiling
    |
-   +--> Tuning
+   +--> Tuning (footer icon)
           +--> Sensitivity / threshold
           +--> Velocity curve editor
           +--> Crosstalk / chord settings
-          +--> Calibration flow
+          +--> Calibration flow (ALL-scope, or picks a pad then SINGLE)
    |
    +--> (Hit Monitor — out of scope for now, footer icon can exist but
    |      lead nowhere / show "coming soon")
@@ -60,10 +64,16 @@ Landing page (4x4 pad matrix + footer)
    +--> (Settings — out of scope for now, same treatment)
 ```
 
-Only **Pad Assignment** and **Tuning** get built out this phase. The other
-two footer icons should still be visually present (so the footer layout is
-final and doesn't need redesigning later) but can be disabled/greyed or
-show a simple placeholder screen.
+Both the per-tile menu's "Calibrate this pad" and the Tuning section's own
+Calibration flow ultimately drive the same underlying mechanism — a
+`CAL_START` call and live `CAL_STATE`-driven highlighting on the hex
+component (see Screen 2 below). They're just two different entry points
+into calibration: one already knows which pad (tap-driven), the other
+starts broader (`ALL` scope, or picks a pad as part of the flow).
+
+Only the hex layout landing page and the per-tile action menu are the
+current build focus. Tuning's 4 sub-screens and the other 2 footer icons
+remain as previously scoped — see below.
 
 ## Screen 1: splash screen
 
@@ -77,48 +87,144 @@ show a simple placeholder screen.
 
 ## Screen 2: landing page
 
-**Layout, top to bottom:**
-- Main content area: 4×4 grid of pad cells, representing the 16 future
-  pads (currently only 6 are physically built — cells for unbuilt pads
-  should probably be visually distinguished as "not yet installed" rather
-  than looking identical to active ones, though the exact treatment is a
-  design decision to make during implementation)
-- Each cell: shows pad number, and eventually (once wired to hit-monitor
-  data) could flash/highlight on a real hit — not required for this phase,
-  but worth keeping the cell component flexible enough to support that
-  later without a rewrite
-- Footer: 4 icon buttons in a row — **Pad Assignment, Tuning, Hit Monitor
-  (disabled), Settings (disabled)**
+**Tile-tap interaction redesigned** (supersedes the earlier "jumps directly
+to Pad Assignment" decision): tapping a populated tile opens a **per-pad
+action menu** instead of going straight to note assignment. Note assignment
+is just one of several actions available for a given pad, not the only
+thing tapping a tile can do. Menu options:
 
-**Interaction for this phase:**
-- Tapping a pad cell while on the landing page: no defined behavior yet —
-  decide whether tapping a cell here should jump straight into Pad
-  Assignment for that specific pad, or whether Pad Assignment is only
-  reached via the footer icon and has its own internal pad picker. Worth
-  deciding before Claude Code builds it, so the matrix component's tap
-  handler is written once, correctly, rather than retrofitted.
+- **Assign note** — what "Pad Assignment" (Screen 3) used to be the only
+  destination for; now one menu item among several
+- **Calibrate this pad** — triggers `CAL_START,<sensor>,SINGLE,<padIndex>`
+  for a single-pad calibration run, not the old "calibrate everything"
+  flow. Sensor type (piezo/velostat) still needs picking — either a
+  sub-choice in this menu item, or the menu offers "Calibrate (piezo)" and
+  "Calibrate (velostat)" as two separate entries
+- **View info** — current threshold/ceiling/curve/note for this pad (a
+  `GET_PAD` query, displaying the `PADVAL` response)
+- **Adjust threshold/ceiling** — direct `SET_THRESH`/`SET_CEILING_BASELINE`
+  for this pad, without going through the full calibration flow
+
+Tapping an empty tile (R00/R01/R04) — no menu, since there's nothing to
+act on yet; possibly a "not installed" message, exact treatment TBD.
+
+**Visual calibration guidance — ties Calibration directly to the hex
+component, not just text status.** When "Calibrate this pad" runs (or the
+Tuning section's `ALL`-scope calibration runs, once that screen exists),
+the hex layout component should visually highlight whichever pad the drum
+Teensy is currently waiting on or capturing, driven directly by
+`CAL_STATE`'s `padIndex` field:
+- `WAITING_TOUCH` (for `SINGLE` scope, target already known) or
+  `CAPTURING,<padIndex>` → highlight that tile using the hex component's
+  existing `selectedIndex` parameter (already built, see Screen 2's
+  original hex layout component work)
+- `PAD_DONE,<padIndex>` → could shift that tile's highlight color to
+  indicate "done" briefly, before returning to normal
+- This means calibration screens don't need their own separate visual
+  representation of "which pad" — they reuse the same hex component
+  already built, just driven by live `CAL_STATE` data instead of a tap
+
+**Live hit visualization — the hex landing page's "idle" behavior.** When
+not showing an action menu overlay or in calibration guidance mode, the
+hex tiles react live to actual playing: whenever a pad's `HIT` message
+updates `drumState`, briefly flash that tile (brighten for ~150-200ms,
+fade back) using the same highlight mechanism as calibration guidance.
+This effectively gives an early, lightweight version of the deferred "Hit
+Monitor" screen for free — it doesn't need to be a separate screen, just
+how the landing page behaves whenever nothing else is overlaid on it.
+
+- **Zero added latency risk to actual playing** — the drum Teensy's `HIT`
+  send is fire-and-forget, sent immediately after the MIDI note already
+  went out, with no round-trip or acknowledgment. The TFT's visualization
+  is fully decoupled from playing feel; the only thing that could lag is
+  the TFT's own redraw keeping up with very fast rolls, which is a display
+  polish concern, not a playing-feel one.
+- **Chords work automatically** — each simultaneous hit is its own
+  independent `HIT` message (the crosstalk filter already separates real
+  chord notes from bleed-through on the drum side), so multiple tiles
+  simply flash together when a chord lands, no special-case logic needed.
+- **Color-code by source** — flash piezo-triggered hits (`HIT`'s `P` tag)
+  one color, velostat-triggered (`V`) a different color, extending the
+  same "which sensor, visually obvious" principle used for the Tuning
+  parameter visualizations (see Screen 4's design principle). Since `HIT`
+  already carries the source tag, this is close to free to add.
+
+**Layout, top to bottom (otherwise unchanged from before):**
+
+**Layout updated with real tile data**, pulled directly from the drum
+project's Blender CAD design (`CLAUDE.md`'s "Physical pad mapping" table)
+rather than an approximate row/offset description. The shell's right
+hemisphere is 9 flat-top hex tiles (`HEX_FLAT_WIDTH=77mm`):
+
+| Tile | x (mm) | y (mm) | Status | Sensor index |
+|---|---|---|---|---|
+| R00 | 38.5 | 100.0 | empty | — |
+| R01 | 115.5 | 100.0 | empty | — |
+| R02 | 0.0 | 33.3 | populated | 0 |
+| R03 | 77.0 | 33.3 | populated | 1 |
+| R04 | 154.0 | 33.3 | empty | — |
+| R05 | 38.5 | -33.3 | populated | 3 |
+| R06 | 115.5 | -33.3 | populated | 5 |
+| R07 | 0.0 | -100.0 | populated | 4 |
+| R08 | 77.0 | -100.0 | populated | 2 |
+
+(Y grows upward in this table, CAD convention — flip sign for screen
+coordinates, which grow downward. Left hemisphere, L00-L06, is a longer-term
+build target per `CLAUDE.md` and not part of this UI yet — only the 9
+right-hemisphere tiles are shown.)
+
+**Top to bottom:**
+- Main content area: hex-packed layout of the 9 tiles above, built as a
+  reusable component (shared with Pad Assignment, see Screen 3) rather than
+  landing-page-specific rendering. Hardcoded tile positions, no runtime hex
+  grid math needed — these are fixed design-time coordinates.
+- Each populated tile shows a **friendly 1-based number** ("Pad 1" through
+  "Pad 6") — NOT the internal 0-based sensor index shown in the table
+  above. Mapping: sensor index 0 → "Pad 1", index 1 → "Pad 2", etc. This
+  distinction is handled at exactly one place in the TFT code (the hex
+  component's own label rendering), not scattered — internal logic, the
+  UART protocol, and the drum sketch all stay 0-indexed; only what's drawn
+  on screen adds 1.
+- Empty slots (R00, R01, R04) are visually distinguished (dimmed fill,
+  dashed outline) — they're real, present shell positions, just not wired
+  to a sensor yet.
+- Footer: same 4 icon buttons as before — Pad Assignment, Tuning, Hit
+  Monitor (disabled), Settings (disabled)
+
+**Interaction:** tapping a pad cell here jumps directly into Pad Assignment
+for that specific pad (this was previously left open in the plan — now
+decided, since Pad Assignment reuses this same hex layout, direct
+navigation is the natural behavior rather than a separate picker).
 
 ## Screen 3: Pad Assignment
 
-**Purpose:** tap a pad, choose what it triggers.
+**Usage pattern clarification (important for design):** this isn't a
+"tweak anytime" control — in practice it's a setup step done once per
+soldering session. The user solders a batch of new sensors onto the shell
+(expected a handful more times while building out toward the full 16-tile
+goal), assigns each newly-wired pad once, and then it stays stable until
+the next soldering round. Worth designing around "fast, clear, focused
+setup flow right after wiring something new" rather than optimizing for
+frequent casual re-assignment.
 
-**Suggested flow:**
-1. Same or similar 4×4 matrix shown again (or reuse the landing page's
-   matrix component), user taps a pad to select it
-2. Selected pad highlighted; a detail panel appears showing current
-   assignment (currently: fixed MIDI notes C4–A#4 per the existing drum
-   sketch's `scaleNotes[]` array)
-3. Some control to change the assignment — simplest version: a note
-   picker (e.g. +/- buttons or a small keyboard widget) to set which MIDI
-   note that pad sends
-4. A "save" or immediate-apply action, which sends the new mapping to the
-   drum Teensy over serial
+**Reuses the landing page's hex layout component** rather than a separate
+matrix — same visual positions, same friendly numbering, same underlying
+tile data table above.
 
-**Open question to resolve before building:** does changing a pad's note
-assignment need to persist across power cycles (i.e. does the drum Teensy
-need to save it to EEPROM/flash), or is it fine for now if it resets to
-the default `scaleNotes[]` array on reboot? This affects whether the drum
-sketch needs a persistence layer added as a prerequisite.
+**Flow:**
+1. Hex layout shown, tap a pad (or arrive here already having tapped one
+   from the landing page)
+2. Selected pad highlighted; detail panel shows current assignment
+   (currently: fixed MIDI notes C4–A#4 per `scaleNotes[]`)
+3. Note picker to change the assignment (+/- buttons or small keyboard
+   widget)
+4. Save/apply sends `SET_NOTE` to the drum Teensy
+
+**Still open, from before:** does note assignment need to persist across
+power cycles (EEPROM/flash on the drum Teensy), or is resetting to
+`scaleNotes[]` defaults on reboot acceptable for now? Unchanged from the
+original plan — still unresolved, still worth deciding before this screen
+is wired to real commands.
 
 ## Screen 4: Tuning (sub-menu with 4 items)
 
@@ -189,20 +295,53 @@ sub-feature below. Each opens its own screen.
   of crosstalk")
 
 ### 4d. Calibration flow
-- Trigger button that sends the equivalent of the existing serial `c`
-  command to start the velostat calibration sequence
-- Screen should mirror the calibration FSM's existing states so the user
-  gets on-screen feedback instead of needing Serial Monitor open:
-  "Resting — don't touch any pad" → "Touch pad to calibrate" → "Pad N
-  calibrated, touch next" → "Calibration complete"
-- This requires the drum Teensy to report its calibration state changes
-  back over serial as they happen, not just accept the trigger command —
-  worth flagging as a protocol requirement once the comms layer is
-  designed
-- Per-pad piezo calibration doesn't exist yet in the drum sketch (it's
-  still a "possible next step" per the drum project's own CLAUDE.md) — this
-  screen should be built to accommodate it once it exists, but only needs
-  to trigger velostat calibration for now
+
+**Substantially re-scoped from the original plan.** Two independent axes
+now, both need to be chosen before starting a calibration run:
+
+**Sensor type:** Piezo or Velostat — calibrated completely independently,
+never together in one run.
+
+**Scope:**
+- **Single pad only** — calibrate just the one pad selected, leave every
+  other pad's existing calibration untouched
+- **Single pad, then copy to all** — calibrate one pad, then apply that
+  same result to every other pad (a deliberate, explicit version of what
+  the drum sketch's `abortToUniformCalibration()` currently does only as
+  an incidental side effect of aborting mid-run)
+- **All pads** — the existing full sequential flow (touch each
+  uncalibrated pad in turn until all are done)
+
+**⚠️ Major prerequisite, not yet done on the drum side:** velostat
+calibration already has a working auto-detect FSM (`startCalibration()` /
+`CAL_WAITING_TOUCH` / `CAL_CAPTURING`, driven by `CAL_START` today). **Piezo
+has no equivalent calibration routine at all** — right now piezo
+thresholds/ceilings are only settable manually, one value at a time, via
+`SET_THRESH`/`SET_CEILING_BASELINE`. Before this screen can do anything
+for piezo, the drum sketch needs its own piezo calibration FSM built —
+likely mirroring the velostat one's shape (rest phase to find noise floor,
+then capture peak on a hard hit), but operating on `piezoThreshold`/
+`piezoCeilingBaseline` instead of `veloRest`/`veloMax`. This is real new
+drum-side feature work, not just protocol wiring — flagged here as a
+blocking prerequisite for the piezo half of this screen.
+
+**Protocol implications (needs a `UART_PROTOCOL.md` update, not decided
+yet):** `CAL_START` currently takes no arguments and always runs a
+full-all-pads velostat calibration. It needs to become parameterized —
+something like `CAL_START,<sensor>,<scope>,<padIndex>` (padIndex only
+meaningful for single-pad scopes) — and `CAL_STATE` messages need to
+indicate which sensor type the state belongs to, so the UI can show the
+right screen. This redesign should happen before implementing either the
+piezo FSM or this screen's real wiring, not organically discovered while
+building both at once.
+
+**UI flow (once the above exists):**
+1. Choose sensor type (Piezo / Velostat)
+2. Choose scope (Single pad / Single pad → copy to all / All pads)
+3. If a single-pad scope, pick the pad (reuse the hex layout component)
+4. Start — screen mirrors the FSM's live state via `CAL_STATE` messages:
+   "Resting — don't touch any pad" → "Touch pad to calibrate" → "Pad N
+   calibrated" → "Complete" (or "Cancelled" for the `ABORTED` state)
 
 ## Deferred: velostat tuning (not yet scoped into the screens above)
 
@@ -223,14 +362,25 @@ add a 5th Tuning sub-screen (or extend existing ones) for velostat feel.
 ## Suggested build order for Claude Code
 
 1. Splash screen (simplest, no interaction, good first milestone)
-2. Landing page shell: 4×4 matrix rendering + footer with all 4 icons
-   (2 active, 2 disabled/placeholder) — no serial logic yet, just layout
-   and navigation between screens
-3. Pad Assignment screen — UI and local state only, `sendCommand()` stub
-4. Tuning sub-menu shell (4 rows, navigation into each) — placeholders OK
-   for the 4 sub-screens initially
-5. Build out 4a–4d one at a time, each with local UI first, serial stub
-   calls in the right places
-6. Only after all screens exist and navigate correctly: design and
-   implement the actual UART protocol between the two Teensys, and wire
-   the stubs to real commands
+2. Hex layout component (shared by landing page and Pad Assignment) —
+   9-slot positions matching the physical shell, friendly 1-based numbering
+   over 0-based internal indices, empty-slot styling for the 3 unpopulated
+   positions
+3. Landing page shell: hex layout + footer with all 4 icons (2 active, 2
+   disabled/placeholder) — no serial logic yet, just layout and navigation
+4. Pad Assignment screen — reuses the hex component, local UI + state only,
+   `sendCommand()` stub for `SET_NOTE`
+5. Tuning sub-menu shell (4 rows, navigation into each) — placeholders OK
+   for all 4 sub-screens initially
+6. Build out 4a–4c (sensitivity, curve editor, crosstalk) one at a time,
+   local UI first, serial stub calls in the right places
+7. **4d (Calibration) is blocked until the drum-side piezo calibration FSM
+   exists and the `CAL_START`/`CAL_STATE` protocol is redesigned for
+   sensor type + scope** (see section 4d above) — do NOT build this
+   screen's real logic before that work happens on the drum side, though
+   the sensor-type/scope *selection* UI (steps 1–3 of the flow) could
+   reasonably be built now with everything past "Start" stubbed
+8. Only after all screens exist and navigate correctly: implement the
+   actual UART command sends for everything stubbed above, replacing the
+   old throwaway `PAD,<label>` parsing entirely with real handling for
+   `HIT`, `PADVAL`, `CAL_STATE`, `XTALKVAL`, `ACK`, `ERR`
