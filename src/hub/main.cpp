@@ -596,6 +596,12 @@ void printStatus() {
                       config.knobs[i].maxValue, config.knobs[i].flags,
                       knobValues[i]);
     }
+    for (uint8_t i = 0; i < kButtonCount; i++) {
+        Serial.printf("button %u: pin=%u note/cc=%u ch=%u mode=%u flags=0x%02X state=%u\n",
+                      i, kButtonPins[i], config.buttons[i].note,
+                      config.buttons[i].channel, config.buttons[i].mode,
+                      config.buttons[i].flags, buttonStates[i]);
+    }
 }
 
 void handleSerialInput() {
