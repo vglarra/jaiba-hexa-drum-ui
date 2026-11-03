@@ -17,6 +17,7 @@
 
 #include <Arduino.h>
 #include <EEPROM.h>
+#include <Encoder.h>
 #include <Wire.h>
 #include <usb_names.h>
 
@@ -53,7 +54,7 @@ constexpr size_t kCommandCap = 128;      // per board
 constexpr uint8_t kKnobCount = 6;
 constexpr uint8_t kButtonCount = 6;
 constexpr uint16_t kConfigMagic = 0x4A4B;
-constexpr uint8_t kConfigVersion = 1;
+constexpr uint8_t kConfigVersion = 2; // 2 = encoder mode + first switch default
 
 // Registers
 constexpr uint8_t kRegId = 0x00;        // 'J','K', version, flags
@@ -79,7 +80,7 @@ struct KnobConfig {
     uint8_t channel;
     uint16_t minValue;
     uint16_t maxValue;
-    uint8_t flags;     // bit0 enabled, bit1 14-bit
+    uint8_t flags;     // bit0 enabled, bit1 14-bit, bit2 encoder
     uint8_t reserved;
 } __attribute__((packed));
 
@@ -102,10 +103,21 @@ struct HubConfig {
 
 HubConfig config;
 
-// Pin plan for the U_UI socket. These are placeholders until the knob/button
-// hardware is defined: only knob 0 (A2) is enabled by default.
-const uint8_t kKnobPins[kKnobCount] = {16, 17, 20, 21, 22, 23}; // A2,A3,A6,A7,A8,A9
+// Pin plan for the U_UI socket. E0 is the first encoder; the other five
+// slots stay disabled until they are wired. Encoders: CLK/DT/SW.
+const uint8_t kKnobPins[kKnobCount] = {16, 17, 20, 21, 22, 23}; // legacy analog fallback
 const uint8_t kButtonPins[kButtonCount] = {2, 3, 4, 5, 6, 7};
+
+// KY-040 quadrature pairs (CLK, DT). E0 = 16/17, SW 2 (button 0).
+Encoder encoder0(16, 17);
+Encoder encoder1(20, 21);
+Encoder encoder2(22, 23);
+Encoder encoder3(8, 9);
+Encoder encoder4(10, 11);
+Encoder encoder5(24, 25);
+Encoder* const kEncoders[kKnobCount] = {
+    &encoder0, &encoder1, &encoder2, &encoder3, &encoder4, &encoder5
+};
 
 uint16_t knobValues[kKnobCount] = {};
 uint16_t knobLastSent[kKnobCount] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
@@ -182,8 +194,8 @@ void setDefaultConfig() {
         config.knobs[i].channel = 1;
         config.knobs[i].minValue = 0;
         config.knobs[i].maxValue = (i == 0) ? 16383 : 127;
-        // Knob 0 is the bench-test pot: enabled + 14-bit (CC 20 / 52).
-        config.knobs[i].flags = (i == 0) ? 0x03 : 0x00;
+        // Knob 0 is the E0 encoder: enabled + 14-bit + encoder (CC 20 / 52).
+        config.knobs[i].flags = (i == 0) ? 0x07 : 0x00;
         config.knobs[i].reserved = 0;
     }
 
@@ -193,6 +205,15 @@ void setDefaultConfig() {
         config.buttons[i].mode = 0;
         config.buttons[i].flags = 0; // disabled until the hardware is defined
     }
+
+    // E0 switch = button 0: CC27 Panic, momentary. Test default; remap later.
+    config.buttons[0].note = 27;
+    config.buttons[0].channel = 1;
+    config.buttons[0].mode = 1;   // CC momentary
+    config.buttons[0].flags = 0x01;
+
+    // Centre E0 (pitch 0) so the first CC starts in the middle of the range.
+    encoder0.write(512); // 8192 / 64 counts-per-detent * 4 quadrature counts
 }
 
 void loadConfig() {
@@ -459,7 +480,6 @@ void updateKnobs() {
     for (uint8_t i = 0; i < kKnobCount; i++) {
         if (!(config.knobs[i].flags & 0x01)) continue;
 
-        uint16_t raw = analogRead(kKnobPins[i]);
         uint16_t lo = config.knobs[i].minValue;
         uint16_t hi = config.knobs[i].maxValue;
         if (hi < lo) {
@@ -468,13 +488,32 @@ void updateKnobs() {
             hi = t;
         }
 
+        bool fourteenBit = (config.knobs[i].flags & 0x02) != 0;
         uint16_t value = lo;
-        if (hi > lo) {
-            value = lo + (uint32_t)raw * (hi - lo) / 4095;
+
+        if (config.knobs[i].flags & 0x04) {
+            // Rotary encoder (KY-040): 4 quadrature counts per detent.
+            const uint16_t step = fourteenBit ? 64 : 1;
+            const long detents = kEncoders[i]->read() / 4;
+            int32_t v = (int32_t)lo + detents * (int32_t)step;
+
+            if (v < (int32_t)lo) {
+                v = lo;
+                kEncoders[i]->write(0);
+            } else if (v > (int32_t)hi) {
+                v = hi;
+                kEncoders[i]->write((long)((hi - lo) / step) * 4);
+            }
+            value = (uint16_t)v;
+        } else {
+            uint16_t raw = analogRead(kKnobPins[i]);
+            if (hi > lo) {
+                value = lo + (uint32_t)raw * (hi - lo) / 4095;
+            }
         }
+
         knobValues[i] = value;
 
-        bool fourteenBit = (config.knobs[i].flags & 0x02) != 0;
         uint16_t threshold = fourteenBit ? 32 : 2;
         int delta = (int)value - (int)knobLastSent[i];
         if (delta < 0) delta = -delta;
@@ -493,11 +532,23 @@ void updateKnobs() {
 }
 
 void updateButtons() {
+    static bool rawLast[kButtonCount] = {};
+    static uint32_t rawChangeMs[kButtonCount] = {};
+
     for (uint8_t i = 0; i < kButtonCount; i++) {
         if (!(config.buttons[i].flags & 0x01)) continue;
 
-        bool pressed = !digitalRead(kButtonPins[i]);
+        const bool raw = !digitalRead(kButtonPins[i]);
+        if (raw != rawLast[i]) {
+            rawLast[i] = raw;
+            rawChangeMs[i] = millis();
+        }
+
+        const bool pressed = rawLast[i];
         buttonStates[i] = pressed ? 1 : 0;
+
+        // 20 ms debounce for the encoder push switches.
+        if (millis() - rawChangeMs[i] < 20) continue;
         if (pressed == buttonLast[i]) continue;
         buttonLast[i] = pressed;
 
